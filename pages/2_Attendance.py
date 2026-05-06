@@ -16,7 +16,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Check if running in cloud
+# Detect if running in cloud
 IS_CLOUD = os.environ.get('STREAMLIT_SHARING', False) or os.environ.get('STREAMLIT_CLOUD', False)
 
 # Premium CSS
@@ -115,14 +115,12 @@ detector, recognizer, attendance_db = init_system()
 
 # Simple liveness detection
 def is_real_face(face_img):
-    """Simple liveness detection"""
     if face_img is None or face_img.size == 0:
         return False, 0, "No face detected"
     
     h, w = face_img.shape[:2]
     gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
     
-    # Check image sharpness
     laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
     
     if laplacian_var > 400:
@@ -130,7 +128,6 @@ def is_real_face(face_img):
     elif laplacian_var < 30:
         return False, 0.3, "Too blurry"
     
-    # Check edge naturalness
     edges = cv2.Canny(gray, 50, 150)
     edge_density = np.sum(edges > 0) / (h * w)
     
@@ -139,12 +136,10 @@ def is_real_face(face_img):
     elif edge_density < 0.03:
         return False, 0.3, "Too few details"
     
-    # Check texture
     texture_variance = np.var(gray)
     if texture_variance < 20:
         return False, 0.2, "Uniform texture - possible print"
     
-    # Calculate final score
     score = (min(1.0, laplacian_var / 200) * 0.4 + 
              (1.0 - abs(edge_density - 0.12) / 0.12) * 0.3 + 
              min(1.0, texture_variance / 150) * 0.3)
@@ -207,198 +202,77 @@ with col4:
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# Main Section
+# Main Section - Photo Upload Only (for cloud compatibility)
 st.markdown('<div class="camera-card">', unsafe_allow_html=True)
 
-if IS_CLOUD:
-    st.info("📸 **Cloud Environment Detected** - Using image upload mode. For live camera, please run locally.")
-    
-    # Upload image mode for cloud
-    uploaded_file = st.file_uploader("Choose an image file", type=['jpg', 'jpeg', 'png'])
-    
-    if uploaded_file is not None:
-        with st.spinner("Analyzing..."):
-            image = Image.open(uploaded_file)
-            frame = np.array(image)
-            
-            if len(frame.shape) == 3 and frame.shape[2] == 3:
-                if frame[0,0,0] > frame[0,0,2]:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            
-            faces = detector.detect_faces_optimized(frame, fast_mode=False)
-            
-            if len(faces) == 0:
-                st.error("❌ No face detected!")
-            else:
-                for face_data in faces:
-                    face_img = face_data['face_img']
-                    x1, y1, x2, y2 = face_data['bbox']
-                    
-                    # Check liveness
-                    is_real, liveness_score, liveness_reason = is_real_face(face_img)
-                    
-                    if not is_real:
-                        st.error(f"❌ {liveness_reason}")
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
-                        cv2.putText(frame, "SPOOF DETECTED", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                    else:
-                        st.success(f"✅ {liveness_reason}")
-                        
-                        # Recognize
-                        name, confidence = recognizer.recognize_face(face_img, threshold=0.45)
-                        
-                        if name and confidence > 0.45:
-                            details = recognizer.student_details.get(name, {})
-                            success = attendance_db.mark_attendance(name, details)
-                            
-                            if success:
-                                st.success(f"✅ Attendance marked for {name}!")
-                                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
-                                cv2.putText(frame, f"{name} ✓", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                            else:
-                                st.info(f"📌 {name} already marked today")
-                                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        else:
-                            st.warning(f"⚠️ Real face detected but not registered")
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
-                
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                st.image(frame_rgb, caption="Result", use_container_width=True)
+st.info("📸 **Upload a photo** - The system will verify if it's a real face or a photo")
+st.markdown("""
+<div class="info-card">
+    💡 Tips for best results:
+    <ul>
+        <li>Use good lighting (not too dark or bright)</li>
+        <li>Look straight at the camera</li>
+        <li>Remove glasses if possible</li>
+        <li>Ensure your face is clearly visible</li>
+    </ul>
+</div>
+""", unsafe_allow_html=True)
 
-else:
-    # Local mode with camera
-    mode = st.radio("", ["🎥 Live Mode", "📸 Photo Mode"], horizontal=True, label_visibility="collapsed")
-    
-    if mode == "🎥 Live Mode":
-        st.markdown('<div class="status-badge status-active">🟢 LIVE MODE ACTIVE</div>', unsafe_allow_html=True)
+uploaded_file = st.file_uploader("Choose an image file", type=['jpg', 'jpeg', 'png'])
+
+if uploaded_file is not None:
+    with st.spinner("Analyzing image..."):
+        image = Image.open(uploaded_file)
+        frame = np.array(image)
         
-        video_placeholder = st.empty()
-        log_container = st.container()
+        if len(frame.shape) == 3 and frame.shape[2] == 3:
+            if frame[0,0,0] > frame[0,0,2]:
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         
-        if 'scanning' not in st.session_state:
-            st.session_state.scanning = True
-        if 'marked_today' not in st.session_state:
-            st.session_state.marked_today = set()
+        faces = detector.detect_faces_optimized(frame, fast_mode=False)
         
-        if st.button("⏹️ Stop Scanning", use_container_width=True):
-            st.session_state.scanning = False
-            st.rerun()
-        
-        if st.session_state.scanning:
-            cap = cv2.VideoCapture(0)
+        if len(faces) == 0:
+            st.error("❌ No face detected! Please ensure your face is clearly visible.")
+        else:
+            st.success(f"✅ {len(faces)} face(s) detected")
             
-            if not cap.isOpened():
-                st.error("❌ Cannot access camera!")
-            else:
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            for face_data in faces:
+                face_img = face_data['face_img']
+                x1, y1, x2, y2 = face_data['bbox']
                 
-                frame_count = 0
+                # Check if it's a real face
+                is_real, liveness_score, liveness_reason = is_real_face(face_img)
                 
-                while st.session_state.scanning:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    
-                    frame_count += 1
-                    
-                    if frame_count % 5 == 0:
-                        faces = detector.detect_faces_optimized(frame, fast_mode=True)
-                        
-                        if len(faces) > 0:
-                            for face_data in faces:
-                                face_img = face_data['face_img']
-                                x1, y1, x2, y2 = face_data['bbox']
-                                
-                                if (x2 - x1) < 60 or (y2 - y1) < 60:
-                                    cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 0), 2)
-                                    cv2.putText(frame, "Move Closer", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
-                                    continue
-                                
-                                is_real, liveness_score, _ = is_real_face(face_img)
-                                
-                                if is_real:
-                                    name, confidence = recognizer.recognize_face(face_img, threshold=0.45)
-                                    
-                                    if name and confidence > 0.45:
-                                        if name not in st.session_state.marked_today:
-                                            details = recognizer.student_details.get(name, {})
-                                            success = attendance_db.mark_attendance(name, details)
-                                            
-                                            if success:
-                                                st.session_state.marked_today.add(name)
-                                                with log_container:
-                                                    st.markdown(f'<div class="success-card">✅ {name} - Attendance Marked!</div>', unsafe_allow_html=True)
-                                            
-                                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
-                                            label = f"{name} ✓"
-                                            cv2.putText(frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                                        else:
-                                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                                            label = f"{name}"
-                                            cv2.putText(frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                                    else:
-                                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
-                                        label = "Not Registered"
-                                        cv2.putText(frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
-                                else:
-                                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
-                                    cv2.putText(frame, "SPOOF", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-                    
-                    cv2.putText(frame, f"Marked: {len(st.session_state.marked_today)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    video_placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
-                    time.sleep(0.05)
-                
-                cap.release()
-                cv2.destroyAllWindows()
-    
-    else:  # Photo Mode
-        picture = st.camera_input("Take a photo", key="photo_capture")
-        
-        if picture:
-            with st.spinner("Analyzing..."):
-                image = Image.open(picture)
-                frame = np.array(image)
-                
-                if len(frame.shape) == 3 and frame.shape[2] == 3:
-                    if frame[0,0,0] > frame[0,0,2]:
-                        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                
-                faces = detector.detect_faces_optimized(frame, fast_mode=False)
-                
-                if len(faces) == 0:
-                    st.error("❌ No face detected!")
+                if not is_real or liveness_score < 0.45:
+                    st.markdown(f'<div class="error-card">❌ SPOOF DETECTED: {liveness_reason}<br>Please upload a REAL face photo, not a screenshot or printed photo.</div>', unsafe_allow_html=True)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                    cv2.putText(frame, "SPOOF DETECTED", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 else:
-                    for face_data in faces:
-                        face_img = face_data['face_img']
-                        x1, y1, x2, y2 = face_data['bbox']
-                        
-                        is_real, liveness_score, liveness_reason = is_real_face(face_img)
-                        
-                        if not is_real:
-                            st.error(f"❌ {liveness_reason}")
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
-                        else:
-                            st.success(f"✅ {liveness_reason}")
-                            name, confidence = recognizer.recognize_face(face_img, threshold=0.45)
-                            
-                            if name and confidence > 0.45:
-                                details = recognizer.student_details.get(name, {})
-                                success = attendance_db.mark_attendance(name, details)
-                                
-                                if success:
-                                    st.success(f"✅ Attendance marked for {name}!")
-                                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
-                                else:
-                                    st.info(f"📌 {name} already marked today")
-                                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                            else:
-                                st.warning(f"⚠️ Real face detected but not registered")
-                                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+                    st.markdown(f'<div class="success-card">✅ REAL FACE VERIFIED! (Liveness: {liveness_score:.2%})</div>', unsafe_allow_html=True)
                     
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    st.image(frame_rgb, caption="Result", use_container_width=True)
+                    # Recognize the face
+                    name, confidence = recognizer.recognize_face(face_img, threshold=0.45)
+                    
+                    if name and confidence > 0.45:
+                        details = recognizer.student_details.get(name, {})
+                        success = attendance_db.mark_attendance(name, details)
+                        
+                        if success:
+                            st.markdown(f'<div class="success-card">✅ Attendance marked for {name}! (Confidence: {confidence:.2%})</div>', unsafe_allow_html=True)
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
+                            cv2.putText(frame, f"{name} ✓", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                        else:
+                            st.info(f"📌 {name} already marked attendance today!")
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                            cv2.putText(frame, f"{name} (Already)", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    else:
+                        st.warning(f"⚠️ Real face detected but NOT REGISTERED in system (Confidence: {confidence:.2%})")
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+                        cv2.putText(frame, "Not Registered", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+            
+            # Display processed image
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            st.image(frame_rgb, caption="Verification Result", use_container_width=True)
 
 st.markdown('</div>', unsafe_allow_html=True)
 
